@@ -132,7 +132,6 @@ WEAK void initVariant(void)
  * Key features:
  *   - SYSCLK = 80 MHz from MSI (4 MHz, Range 6) via PLL (4MHz x 40/2)
  *   - USB FS (48 MHz) sourced from PLLSAI1 (4MHz x 24/2)
- *   - HSI disabled to reduce current consumption (~200-300 uA)
  *   - LSE enabled with medium-low drive for RTC and MSI auto-calibration (MSIPLLEN)
  *   - Voltage Scale 1 required for 80 MHz operation
  *   - FLASH_LATENCY_4 required for HCLK > 64 MHz at VOS1 (RM0394 s.3.3.3)
@@ -140,9 +139,8 @@ WEAK void initVariant(void)
  *   - Wake-up clock after STOP: MSI (PLL must be re-locked manually after wake)
  *
  * References:
- *   - RM0394 Rev 6 (STM32L43x/L44x) - s.6.2 "MSI clock"
- *   - RM0394 s.6.2.9 "MSI PLL-mode"
- *   - RM0394 s.3.3.3 "Performance versus VDD and clock frequency"
+ *   - RM0394 Rev 6 (STM32L43x/L44x) - s.6.2.3 "MSI clock" (includes MSI PLL-mode)
+ *   - RM0394 s.3.3.3 "Read access latency"
  *   - AN2867 Rev 11 - "Oscillator design guide for STM8AF/AL/S, STM32 MCUs and MPUs"
  */
 WEAK void SystemClock_Config(void)
@@ -153,15 +151,15 @@ WEAK void SystemClock_Config(void)
 
   /** Enable PWR peripheral clock
   *
-  * RM0394 s.5.1.2: PWR registers are on APB1. PWREN (RCC_APB1ENR1 bit 28)
-  * resets to 1, so this is defensive rather than strictly necessary, but
-  * required for correctness if PWREN has been cleared by prior code.
+  * RM0394 s.6.4.18: PWREN (RCC_APB1ENR1 bit 28) resets to 0, so this call
+  * is required before accessing any PWR register (e.g.,
+  * HAL_PWREx_ControlVoltageScaling below).
   * CubeMX generates this unconditionally for all STM32L4 projects.
   */
   __HAL_RCC_PWR_CLK_ENABLE();
 
   /* Voltage scaling - Scale 1 required for SYSCLK = 80 MHz
-   * RM0394 s.6.1: VOS2 supports up to 26 MHz only
+   * RM0394 s.5.1.7: VOS2 supports up to 26 MHz only
    */
   if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK) {
     Error_Handler();
@@ -186,17 +184,15 @@ WEAK void SystemClock_Config(void)
   *
   * Oscillator configuration summary:
   *   - MSI: MSIRANGE_6 (4 MHz) -- used as PLL input
-  *   - HSI: OFF -- Unused, disabling it saves ~200-300 uA
   *   - PLL: ON  (MSI 4MHz x PLLN=40 / PLLR=2 = 80 MHz)
   *   - SYSCLK: PLLCLK (80 MHz)
   *   - USB clock: PLLSAI1 (48 MHz)
   *   - MSIRDY transient can not stall SysTick because SYSCLK = PLL, not MSI.
-  *   - FLASH_LATENCY: 4 (required for 80 MHz / VOS1 per RM0394 s.3.3)
+  *   - FLASH_LATENCY: 4 (required for 80 MHz / VOS1 per RM0394 s.3.3.3)
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSE
                                      | RCC_OSCILLATORTYPE_MSI;
   RCC_OscInitStruct.LSEState = RCC_LSE_ON;
-  RCC_OscInitStruct.HSIState = RCC_HSI_OFF;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
@@ -217,12 +213,12 @@ WEAK void SystemClock_Config(void)
   * the PLL output, completely decoupled from MSI. Any subsequent MSIRDY
   * transient (from HAL_RCCEx_EnableMSIPLLMode below) cannot stall SysTick.
   */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
-                                | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.ClockType      = RCC_CLOCKTYPE_HCLK    | RCC_CLOCKTYPE_PCLK1
+                                     | RCC_CLOCKTYPE_PCLK2 | RCC_CLOCKTYPE_SYSCLK;
+  RCC_ClkInitStruct.AHBCLKDivider  = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
   /* FLASH_LATENCY_4: required for HCLK > 64 MHz at VOS1 (RM0394 s.3.3.3) */
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK) {
     Error_Handler();
@@ -259,7 +255,7 @@ WEAK void SystemClock_Config(void)
 
   /** Enable MSI Auto calibration (MSIPLLEN, RCC_CR[2])
    *
-   * RM0394 s.6.2 (MSI clock): setting MSIPLLEN causes the MSI hardware
+   * RM0394 s.6.2.3 (MSI clock): setting MSIPLLEN causes the MSI hardware
    * to automatically trim itself against LSE as a phase reference,
    * reducing MSI frequency error to < +/-0.25%. LSE must already be
    * stable (LSERDY=1) before the bit is set -- guaranteed here because
@@ -277,7 +273,7 @@ WEAK void SystemClock_Config(void)
    *
    *   (2) If SYSCLK were MSI, a deadlock would be possible: MSIRDY
    *       drops -> SysTick stalls -> HAL_GetTick() freezes -> any
-   *       subsequent timeout loop never exits. RM0394 s.6.2.9 confirms
+   *       subsequent timeout loop never exits. RM0394 s.6.2 confirms
    *       SysTick is driven by HCLK (= SYSCLK / AHBdiv). Because
    *       SYSCLK is now PLLCLK (80 MHz), SysTick is completely
    *       decoupled from MSI and the transient is harmless.
